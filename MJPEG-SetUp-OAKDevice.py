@@ -84,7 +84,6 @@ script.setScript("""
     run_server()
 """)
 # Connect the device and start the pipeline
-# dai.DeviceInfo('10.36.115.61')
 with dai.Device(pipeline) as device:
     # Device is now ready to use
     print("Device is running. Access the streams via HTTP at:")
@@ -99,7 +98,7 @@ with dai.Device(pipeline) as device:
         # Program was interrupted, stop the device
         pass
 #-----------------Attempting----------------------
-# device_object = dai.DeviceInfo("10.36.115.61")
+# device_object = dai.DeviceInfo("0.0.0.0")
 # with dai.Device(pipeline, device_object) as device:
 #         while not device.isClosed():
 #             time.sleep(1)
