@@ -98,7 +98,7 @@ with dai.Device(pipeline) as device:
     except KeyboardInterrupt:
         # Program was interrupted, stop the device
         pass
-
+#-----------------Attempting----------------------
 # device_object = dai.DeviceInfo("10.36.115.61")
 # with dai.Device(pipeline, device_object) as device:
 #         while not device.isClosed():
