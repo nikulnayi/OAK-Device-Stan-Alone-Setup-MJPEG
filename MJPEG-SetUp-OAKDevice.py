@@ -1,104 +1,100 @@
 import depthai as dai
-import time
-# Start defining a pipeline
+
+# Create pipeline
 pipeline = dai.Pipeline()
 
-# Define a source - color camera
-color_cam = pipeline.create(dai.node.ColorCamera)
-color_cam.setResolution(dai.ColorCameraProperties.SensorResolution.THE_1080_P)
-color_cam.initialControl.setManualFocus(100)  # 0..255
+# Define sources - color camera and mono cameras
+colorCam = pipeline.create(dai.node.ColorCamera)
+colorCam.setResolution(dai.ColorCameraProperties.SensorResolution.THE_1080_P)
 
-# Define left and right cameras for stereo vision
-left = pipeline.create(dai.node.MonoCamera)
-left.setBoardSocket(dai.CameraBoardSocket.CAM_B)  # Updated from LEFT to CAM_B
-left.setResolution(dai.MonoCameraProperties.SensorResolution.THE_400_P)
+monoLeft = pipeline.create(dai.node.MonoCamera)
+monoRight = pipeline.create(dai.node.MonoCamera)
+monoLeft.setResolution(dai.MonoCameraProperties.SensorResolution.THE_400_P)
+monoLeft.setBoardSocket(dai.CameraBoardSocket.CAM_B)
+monoRight.setResolution(dai.MonoCameraProperties.SensorResolution.THE_400_P)
+monoRight.setBoardSocket(dai.CameraBoardSocket.CAM_C)
 
-right = pipeline.create(dai.node.MonoCamera)
-right.setBoardSocket(dai.CameraBoardSocket.CAM_C)  # Updated from RIGHT to CAM_C
-right.setResolution(dai.MonoCameraProperties.SensorResolution.THE_400_P)
+# Create output for color camera
+xoutColor = pipeline.create(dai.node.XLinkOut)
+xoutColor.setStreamName("color")
+colorCam.video.link(xoutColor.input)
 
+# Set up stereo depth
+depth = pipeline.create(dai.node.StereoDepth)
+depth.setExtendedDisparity(False)
+depth.setSubpixel(False)
+depth.setLeftRightCheck(True)
+depth.initialConfig.setConfidenceThreshold(200)
+depth.setDepthAlign(dai.CameraBoardSocket.CAM_A)
+monoLeft.out.link(depth.left)
+monoRight.out.link(depth.right)
 
-
-# Create stereo depth node to compute depth map
-stereo = pipeline.create(dai.node.StereoDepth)
-stereo.setDefaultProfilePreset(dai.node.StereoDepth.PresetMode.HIGH_DENSITY)
-left.out.link(stereo.left)
-right.out.link(stereo.right)
-
-# # Create xout nodes for debugging (optional)
-# xout_depth = pipeline.create(dai.node.XLinkOut)
-# xout_depth.setStreamName("depth")
-# stereo.depth.link(xout_depth.input)
-
-# VideoEncoders for color camera and stereo depth
-color_jpeg_enc = pipeline.create(dai.node.VideoEncoder)
-color_jpeg_enc.setDefaultProfilePreset(30, dai.VideoEncoderProperties.Profile.MJPEG)
-color_cam.video.link(color_jpeg_enc.input)
-
-stereo_jpeg_enc = pipeline.create(dai.node.VideoEncoder)
-stereo_jpeg_enc.setDefaultProfilePreset(30, dai.VideoEncoderProperties.Profile.MJPEG)
-stereo.disparity.link(stereo_jpeg_enc.input)
+# Create output for depth
+xoutDepth = pipeline.create(dai.node.XLinkOut)
+xoutDepth.setStreamName("depth")
+depth.disparity.link(xoutDepth.input)
 
 # Script node
 script = pipeline.create(dai.node.Script)
-script.setProcessor(dai.ProcessorType.LEON_CSS)
-color_jpeg_enc.bitstream.link(script.inputs['jpeg_color'])
-stereo_jpeg_enc.bitstream.link(script.inputs['jpeg_stereo'])
+script.inputs['color'].setBlocking(False)
+script.inputs['color'].setQueueSize(1)
+script.inputs['depth'].setBlocking(False)
+script.inputs['depth'].setQueueSize(1)
+colorCam.video.link(script.inputs['color'])
+depth.disparity.link(script.inputs['depth'])
 
 script.setScript("""
-    import socket
-    import struct
-    from http.server import BaseHTTPRequestHandler, HTTPServer
-    from socketserver import ThreadingMixIn
+import socket
+import struct
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from socketserver import ThreadingMixIn
+import cv2
+import numpy as np
 
-    class CamHTTPHandler(BaseHTTPRequestHandler):
-        def do_GET(self):
-            if self.path == '/normal':
-                self.send_stream('jpeg_color')
-            elif self.path == '/stereo':
-                self.send_stream('jpeg_stereo')
+class CamHTTPHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == '/normal':
+            self.send_stream('color')
+        elif self.path == '/stereo':
+            self.send_stream('depth')
+        else:
+            self.send_error(404, "Page Not Found")
 
-        def send_stream(self, input_name):
-            self.send_response(200)
-            self.send_header('Content-type', 'multipart/x-mixed-replace; boundary=--frameBoundary')
-            self.end_headers()
-            while True:
-                try:
-                    frame = node.io[input_name].get()
-                    self.wfile.write(b'--frameBoundary')
-                    self.send_header('Content-type', 'image/jpeg')
-                    self.send_header('Content-length', len(frame.getData()))
-                    self.end_headers()
-                    self.wfile.write(frame.getData())
-                except Exception as e:
-                    break
-
-    class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
-         \"\"\"Handle requests in a separate thread.\"\"\"
-
-    def run_server(server_class=ThreadedHTTPServer, handler_class=CamHTTPHandler, port=8080):
-        server_address = ('', port)
-        httpd = server_class(server_address, handler_class)
-        httpd.serve_forever()
-
-    run_server()
-""")
-# Connect the device and start the pipeline
-with dai.Device(pipeline) as device:
-    # Device is now ready to use
-    print("Device is running. Access the streams via HTTP at:")
-    print("Normal view: http://<device-ip>:8080/normal")
-    print("Stereo view: http://<device-ip>:8080/stereo")
-
-    # Keep the script running
-    try:
+    def send_stream(self, input_name):
+        self.send_response(200)
+        self.send_header('Content-type', 'multipart/x-mixed-replace; boundary=--frameBoundary')
+        self.end_headers()
         while True:
-            pass
-    except KeyboardInterrupt:
-        # Program was interrupted, stop the device
-        pass
-#-----------------Attempting----------------------
-# device_object = dai.DeviceInfo("0.0.0.0")
-# with dai.Device(pipeline, device_object) as device:
-#         while not device.isClosed():
-#             time.sleep(1)
+            data = node.io[input_name].tryGet()
+            if data is not None:
+                frame = data.getCvFrame()
+                if input_name == 'depth':
+                    # Normalize and colorize depth frame for visualization
+                    frame = (frame * (255 / node.getMaxDisparity())).astype(np.uint8)
+                    frame = cv2.applyColorMap(frame, cv2.COLORMAP_JET)
+                _, encodedImage = cv2.imencode('.jpg', frame)
+                self.wfile.write(b'--frameBoundary\\r\\n')
+                self.send_header('Content-type', 'image/jpeg')
+                self.send_header('Content-length', len(encodedImage))
+                self.end_headers()
+                self.wfile.write(bytearray(encodedImage))
+                self.wfile.write(b'\\r\\n')
+
+class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
+    # Handle requests in a separate thread
+
+def run_server():
+    server_address = ('', 8080)
+    httpd = ThreadedHTTPServer(server_address, CamHTTPHandler)
+    httpd.serve_forever()
+
+run_server()
+""")
+
+
+# Connect device and start pipeline
+with dai.Device(pipeline) as device:
+    # Device is now ready to start the pipeline
+    device.startPipeline()
+    while True:
+        pass  # Keep the script running
