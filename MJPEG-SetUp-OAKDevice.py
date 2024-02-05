@@ -95,6 +95,6 @@ run_server()
 # Connect device and start pipeline
 with dai.Device(pipeline) as device:
     # Device is now ready to start the pipeline
-    device.startPipeline()
     while True:
         pass  # Keep the script running
+
