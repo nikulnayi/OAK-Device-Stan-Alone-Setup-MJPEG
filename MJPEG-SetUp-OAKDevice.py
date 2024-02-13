@@ -1,100 +1,104 @@
 import depthai as dai
+import time
 
-# Create pipeline
+# Start defining a pipeline
 pipeline = dai.Pipeline()
+# Define a source - color camera
+cam = pipeline.create(dai.node.ColorCamera)
+cam.setFps(60)
+cam.setResolution(dai.ColorCameraProperties.SensorResolution.THE_1080_P)
+cam.initialControl.setManualFocus(185) # 0..255
 
-# Define sources - color camera and mono cameras
-colorCam = pipeline.create(dai.node.ColorCamera)
-colorCam.setResolution(dai.ColorCameraProperties.SensorResolution.THE_1080_P)
+manip = pipeline.create(dai.node.ImageManip)# Calculate the normalized crop rectangle for a 960x540 crop
+manip.initialConfig.setCropRect(0.3917, 0.3574, 0.6083, 0.7426)
 
-monoLeft = pipeline.create(dai.node.MonoCamera)
-monoRight = pipeline.create(dai.node.MonoCamera)
-monoLeft.setResolution(dai.MonoCameraProperties.SensorResolution.THE_400_P)
-monoLeft.setBoardSocket(dai.CameraBoardSocket.CAM_B)
-monoRight.setResolution(dai.MonoCameraProperties.SensorResolution.THE_400_P)
-monoRight.setBoardSocket(dai.CameraBoardSocket.CAM_C)
-
-# Create output for color camera
-xoutColor = pipeline.create(dai.node.XLinkOut)
-xoutColor.setStreamName("color")
-colorCam.video.link(xoutColor.input)
-
-# Set up stereo depth
-depth = pipeline.create(dai.node.StereoDepth)
-depth.setExtendedDisparity(False)
-depth.setSubpixel(False)
-depth.setLeftRightCheck(True)
-depth.initialConfig.setConfidenceThreshold(200)
-depth.setDepthAlign(dai.CameraBoardSocket.CAM_A)
-monoLeft.out.link(depth.left)
-monoRight.out.link(depth.right)
-
-# Create output for depth
-xoutDepth = pipeline.create(dai.node.XLinkOut)
-xoutDepth.setStreamName("depth")
-depth.disparity.link(xoutDepth.input)
-
+# VideoEncoder
+jpeg = pipeline.create(dai.node.VideoEncoder)
+jpeg.setDefaultProfilePreset(cam.getFps(), dai.VideoEncoderProperties.Profile.MJPEG)
+jpeg.setQuality(50)
 # Script node
 script = pipeline.create(dai.node.Script)
-script.inputs['color'].setBlocking(False)
-script.inputs['color'].setQueueSize(1)
-script.inputs['depth'].setBlocking(False)
-script.inputs['depth'].setQueueSize(1)
-colorCam.video.link(script.inputs['color'])
-depth.disparity.link(script.inputs['depth'])
 
+script.setProcessor(dai.ProcessorType.LEON_CSS)
 script.setScript("""
-import socket
-import struct
-from http.server import BaseHTTPRequestHandler, HTTPServer
-from socketserver import ThreadingMixIn
-import cv2
-import numpy as np
+    import time
+    import socket
+    import fcntl
+    import struct
+    from socketserver import ThreadingMixIn
+    from http.server import BaseHTTPRequestHandler, HTTPServer
 
-class CamHTTPHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        if self.path == '/normal':
-            self.send_stream('color')
-        elif self.path == '/stereo':
-            self.send_stream('depth')
-        else:
-            self.send_error(404, "Page Not Found")
+    PORT = 8080
 
-    def send_stream(self, input_name):
-        self.send_response(200)
-        self.send_header('Content-type', 'multipart/x-mixed-replace; boundary=--frameBoundary')
-        self.end_headers()
-        while True:
-            data = node.io[input_name].tryGet()
-            if data is not None:
-                frame = data.getCvFrame()
-                if input_name == 'depth':
-                    # Normalize and colorize depth frame for visualization
-                    frame = (frame * (255 / node.getMaxDisparity())).astype(np.uint8)
-                    frame = cv2.applyColorMap(frame, cv2.COLORMAP_JET)
-                _, encodedImage = cv2.imencode('.jpg', frame)
-                self.wfile.write(b'--frameBoundary\\r\\n')
-                self.send_header('Content-type', 'image/jpeg')
-                self.send_header('Content-length', len(encodedImage))
+    def get_ip_address(ifname):
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        return socket.inet_ntoa(fcntl.ioctl(
+            s.fileno(),
+            -1071617759,  # SIOCGIFADDR
+            struct.pack('256s', ifname[:15].encode())
+        )[20:24])
+
+    class ThreadingSimpleServer(ThreadingMixIn, HTTPServer):
+        pass
+
+    class HTTPHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == '/':
+                self.send_response(200)
                 self.end_headers()
-                self.wfile.write(bytearray(encodedImage))
-                self.wfile.write(b'\\r\\n')
+                self.wfile.write(b'<h1>[DepthAI] Hello, world!</h1><p>Click <a href="img">here</a> for an image</p>')
+            elif self.path == '/img':
+                try:
+                    self.send_response(200)
+                    self.send_header('Content-type', 'multipart/x-mixed-replace; boundary=--jpgboundary')
+                    self.end_headers()
+                    fpsCounter = 0
+                    timeCounter = time.time()
+                    while True:
+                        jpegImage = node.io['jpeg'].get()
+                        self.wfile.write("--jpgboundary".encode())
+                        self.wfile.write(bytes([13, 10]))
+                        self.send_header('Content-type', 'image/jpeg')
+                        self.send_header('Content-length', str(len(jpegImage.getData())))
+                        self.end_headers()
+                        self.wfile.write(jpegImage.getData())
+                        self.end_headers()
 
-class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
-    # Handle requests in a separate thread
+                        fpsCounter = fpsCounter + 1
+                        if time.time() - timeCounter > 1:
+                            node.warn(f'FPS: {fpsCounter}')
+                            fpsCounter = 0
+                            timeCounter = time.time()
+                except Exception as ex:
+                    node.warn(str(ex))
 
-def run_server():
-    server_address = ('', 8080)
-    httpd = ThreadedHTTPServer(server_address, CamHTTPHandler)
-    httpd.serve_forever()
-
-run_server()
+    with ThreadingSimpleServer(("", PORT), HTTPHandler) as httpd:
+        node.warn(f"Serving at {get_ip_address('re0')}:{PORT}")
+        httpd.serve_forever()
 """)
 
+# Connections
+# Linking
+cam.video.link(manip.inputImage)  # Link camera to ImageManip
+manip.out.link(jpeg.input)  # Link ImageManip to VideoEncoder
+jpeg.bitstream.link(script.inputs['jpeg'])
 
-# Connect device and start pipeline
-with dai.Device(pipeline) as device:
-    # Device is now ready to start the pipeline
-    while True:
-        pass  # Keep the script running
+# device_info = dai.DeviceInfo("0.0.0.0")
+# if device_info:
+#     try:
+#         print(device_info)
+#         progress = lambda p: print(f'Flashing progress: {p*100:.1f}%') 
+#         # Start the flashing process
+#         dai.DeviceBootloader(devInfo=device_info).flash(progress, pipeline) 
+#         print("Flashing completed.")
+#     except Exception as e:
+#         # Handle exceptions that occurred during the flashing process
+#         print(f"An error occurred during flashing: {e}")
+# else:
+#     print(f"No device with IP address {device_info.name} found.")
 
+
+device_info = dai.DeviceInfo("0.0.0.0") # Device IP Address
+with dai.Device(pipeline, device_info) as device:
+    while not device.isClosed():
+        time.sleep(1)
